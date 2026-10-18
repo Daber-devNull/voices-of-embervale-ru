@@ -8,3 +8,5 @@ payload/
 *.wav
 *.qoa
 *.zip
+__pycache__/
+*.pyc
