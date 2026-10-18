@@ -37,7 +37,7 @@ Close the game first. “Отключить · копию сохранить” 
 - Partial journal coverage; NPCs are not dubbed.
 - Compatibility is pinned to the tested game build.
 - F3 must not be captured by another global hotkey.
-- The installer is unsigned and Windows may show a standard warning. Source code and hashes are included in the archive.
+- The installer is unsigned and Windows may show a standard warning. Source code is on [GitHub](https://github.com/Daber-devNull/voices-of-embervale-ru); the archive SHA-256 is provided next to the download.
 
 For feedback, include the journal entry title, what you heard, the expected text, and your game version. For technical reports, include the installer status and any other mod loader in use.
 
