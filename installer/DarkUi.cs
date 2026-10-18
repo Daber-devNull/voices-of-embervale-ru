@@ -62,7 +62,7 @@ internal static class Theme
             MaximizeBox = false, MinimizeBox = false, ShowInTaskbar = false
         };
         DarkTitleBar(dialog);
-        dialog.Controls.Add(Label("Голоса Эмбервейла · версия 0.2.0 beta", 20, 18, 460, 30, 12, true));
+        dialog.Controls.Add(Label("Голоса Эмбервейла · версия 0.3.0 beta", 20, 18, 460, 30, 12, true));
         dialog.Controls.Add(Label("Иконка: Icons8", 20, 59, 140, 25, color: Muted));
         var credit = new LinkLabel
         {

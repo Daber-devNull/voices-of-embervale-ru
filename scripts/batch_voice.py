@@ -43,10 +43,18 @@ def encode_one(entry: dict, directory: Path) -> dict:
     if len(samples) > frames:
         return {"status": "too_long", "speech_seconds": len(samples) / 48000,
                 "original_seconds": frames / 48000}
-    path = GAME / entry["source_file"]
-    with path.open("rb") as stream:
-        stream.seek(entry["source_offset"])
-        original_qoa = stream.read(entry["source_size"])
+    if entry.get("source_kind") == "inline":
+        sys.path.insert(0, str(PROJECT / "tools/inspector"))
+        import find_sound
+        find_sound.ROOT = PROJECT / "local/game-backup-eml-001"
+        descriptor = find_sound.Reader().resource(entry["source_resource_index"])
+        start = entry["source_inline_offset"]
+        original_qoa = descriptor[start:start + entry["source_size"]]
+    else:
+        path = GAME / entry["source_file"]
+        with path.open("rb") as stream:
+            stream.seek(entry["source_offset"])
+            original_qoa = stream.read(entry["source_size"])
     if len(original_qoa) != entry["source_size"]:
         raise ValueError("Original sound range changed")
     original_rms = statistics(decode(original_qoa, frames), 48000)["rms"]
