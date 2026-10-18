@@ -87,7 +87,7 @@ def main() -> None:
     shutil.copytree(EML, SOURCE / "third_party" / "EML-0.2.0",
                     ignore=shutil.ignore_patterns(".git"))
     shutil.copytree(INSTALLER / "licenses", SOURCE / "licenses")
-    for name in ("THIRD_PARTY.md", "NEXUS_PAGE_RU.md", "NEXUS_PAGE_EN.md"):
+    for name in ("THIRD_PARTY.md",):
         shutil.copy2(INSTALLER / name, SOURCE / name)
     shutil.copy2(INSTALLER / "README_SOURCE.md", SOURCE / "README.md")
     (SOURCE / ".gitignore").write_text(

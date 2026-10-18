@@ -352,8 +352,8 @@ internal sealed class MainForm : Form
     internal MainForm()
     {
         Text = "Голоса Эмбервейла — управление модом";
-        ClientSize = new Size(760, 455);
-        MinimumSize = new Size(760, 455);
+        ClientSize = new Size(760, 482);
+        MinimumSize = new Size(760, 482);
         MaximizeBox = false;
         BackColor = Theme.Background;
         ForeColor = Theme.Text;
@@ -408,9 +408,20 @@ internal sealed class MainForm : Form
         UpdateButtons();
         Controls.Add(Theme.Label("F3 в игре: включить или выключить русскую озвучку · 520 записей",
                                  28, 424, 610, 23, color: Theme.Good));
+        Controls.Add(Theme.Label("Разработчик:", 28, 451, 108, 23, color: Theme.Muted));
+        var developer = new LinkLabel
+        {
+            Text = "Daber (Hypeber)", Location = new Point(136, 451), Size = new Size(160, 23),
+            LinkColor = Color.FromArgb(164, 174, 255), ActiveLinkColor = Theme.Text,
+            VisitedLinkColor = Color.FromArgb(164, 174, 255), BackColor = Color.Transparent
+        };
+        developer.LinkClicked += (_, _) =>
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("https://github.com/Daber-devNull")
+            { UseShellExecute = true });
+        Controls.Add(developer);
         var about = new LinkLabel
         {
-            Text = "О программе", Location = new Point(650, 424), Size = new Size(90, 23),
+            Text = "О программе", Location = new Point(650, 451), Size = new Size(90, 23),
             LinkColor = Theme.Muted, ActiveLinkColor = Theme.Text,
             VisitedLinkColor = Theme.Muted, BackColor = Color.Transparent
         };
