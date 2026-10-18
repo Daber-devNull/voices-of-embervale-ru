@@ -74,7 +74,7 @@ internal static class Operations
         string manifestPath = Path.Combine(Payload, "manifest.json");
         var manifest = JsonSerializer.Deserialize<PayloadManifest>(File.ReadAllText(manifestPath), JsonOptions)
                        ?? throw new InvalidOperationException("Манифест пакета пуст.");
-        if (manifest.Files.Count != 532) throw new InvalidOperationException("Пакет озвучки неполный.");
+        if (manifest.Files.Count != 883) throw new InvalidOperationException("Пакет озвучки неполный.");
         foreach (var item in manifest.Files)
             if (!File.Exists(SafePayloadPath(item.Key)) || Hash(SafePayloadPath(item.Key)) != item.Value)
                 throw new InvalidOperationException("Пакет повреждён: " + item.Key);
@@ -167,9 +167,11 @@ internal static class Operations
         foreach (var item in state.OwnedDlls)
             if (!File.Exists(Path.Combine(game, item.Key)) || Hash(Path.Combine(game, item.Key)) != item.Value)
                 return "Файл загрузки мода изменился после установки. Требуется проверка.";
+        if (state.ModFiles.Count == 528)
+            return "Установлена прежняя версия: 525 страниц. Для обновления нажмите «Отключить · копию сохранить», затем «Установить мод».";
         return refreshed
-            ? "Русская озвучка установлена: 525 записей. Индекс обновлён загрузчиком при запуске игры."
-            : "Русская озвучка установлена: 525 записей, F3 включает и выключает её.";
+            ? "Русская озвучка установлена: 525 страниц и 294 реплики персонажей. Индекс обновлён загрузчиком при запуске игры."
+            : "Русская озвучка установлена: 525 страниц и 294 реплики персонажей, F3 включает и выключает её.";
     }
 
     internal static void Install(string game)
@@ -289,8 +291,8 @@ internal static class Operations
             throw new InvalidOperationException("EML не завершился за 15 минут.");
         }
         string output = stdout.GetAwaiter().GetResult() + stderr.GetAwaiter().GetResult();
-        if (process.ExitCode != 0 || output.Split("RU_VOICE_MAP ").Length - 1 != 525)
-            throw new InvalidOperationException("EML не создал 525 записей. " + output[^Math.Min(output.Length, 700)..]);
+        if (process.ExitCode != 0 || output.Split("RU_VOICE_MAP ").Length - 1 != 819)
+            throw new InvalidOperationException("EML не создал 819 записей. " + output[^Math.Min(output.Length, 700)..]);
     }
 
     internal static void Restore(string game, bool deleteBackup)
@@ -411,7 +413,7 @@ internal sealed class MainForm : Form
             Controls.Add(buttons[i]);
         }
         UpdateButtons();
-        Controls.Add(Theme.Label("F3 в игре: включить или выключить русскую озвучку · 525 записей",
+        Controls.Add(Theme.Label("F3 в игре: русская озвучка · 525 страниц и 294 реплики персонажей",
                                  28, 424, 610, 23, color: Theme.Good));
         Controls.Add(Theme.Label("Разработчик:", 28, 451, 108, 23, color: Theme.Muted));
         var developer = new LinkLabel
@@ -485,8 +487,22 @@ internal sealed class MainForm : Form
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
+        if (args.Length == 2 && args[0] is "--install" or "--restore")
+        {
+            try
+            {
+                if (args[0] == "--install") Operations.Install(args[1]);
+                else Operations.Restore(args[1], false);
+            }
+            catch (Exception error)
+            {
+                Console.Error.WriteLine(error.Message);
+                Environment.ExitCode = 1;
+            }
+            return;
+        }
         ApplicationConfiguration.Initialize();
         using var singleInstance = new Mutex(true, @"Local\EnshroudedRuVoiceInstaller", out bool createdNew);
         if (!createdNew)
