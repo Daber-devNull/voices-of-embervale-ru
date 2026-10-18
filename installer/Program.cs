@@ -34,7 +34,8 @@ internal static class Operations
     internal static string Payload => Path.Combine(AppContext.BaseDirectory, "payload");
     private static string Backup(string game) => Path.Combine(game, ".ru_voice_backup");
     private static string StatePath(string game) => Path.Combine(Backup(game), "state.json");
-    private static string ModPath(string game) => Path.Combine(game, "mods", "ru_voice_separate_520");
+    private static string ModPath(string game) => Path.Combine(game, "mods", "ru_voice_separate_525");
+    private static string PreviousModPath(string game) => Path.Combine(game, "mods", "ru_voice_separate_520");
     private static string Expected(string name) => name == "enshrouded.kfc" ? KfcHash : ResourcesHash;
 
     internal static string Hash(string path)
@@ -73,7 +74,7 @@ internal static class Operations
         string manifestPath = Path.Combine(Payload, "manifest.json");
         var manifest = JsonSerializer.Deserialize<PayloadManifest>(File.ReadAllText(manifestPath), JsonOptions)
                        ?? throw new InvalidOperationException("Манифест пакета пуст.");
-        if (manifest.Files.Count < 525) throw new InvalidOperationException("Пакет озвучки неполный.");
+        if (manifest.Files.Count != 532) throw new InvalidOperationException("Пакет озвучки неполный.");
         foreach (var item in manifest.Files)
             if (!File.Exists(SafePayloadPath(item.Key)) || Hash(SafePayloadPath(item.Key)) != item.Value)
                 throw new InvalidOperationException("Пакет повреждён: " + item.Key);
@@ -142,6 +143,8 @@ internal static class Operations
     {
         CheckGame(game);
         var state = ReadState(game);
+        if (Directory.Exists(PreviousModPath(game)))
+            return "Найдена версия на 520 записей. Сначала отключите её прежним установщиком.";
         if (state is null)
         {
             if (Directory.Exists(ModPath(game)))
@@ -165,14 +168,16 @@ internal static class Operations
             if (!File.Exists(Path.Combine(game, item.Key)) || Hash(Path.Combine(game, item.Key)) != item.Value)
                 return "Файл загрузки мода изменился после установки. Требуется проверка.";
         return refreshed
-            ? "Русская озвучка установлена: 520 записей. Индекс обновлён загрузчиком при запуске игры."
-            : "Русская озвучка установлена: 520 записей, F3 включает и выключает её.";
+            ? "Русская озвучка установлена: 525 записей. Индекс обновлён загрузчиком при запуске игры."
+            : "Русская озвучка установлена: 525 записей, F3 включает и выключает её.";
     }
 
     internal static void Install(string game)
     {
         CheckClosed();
         CheckGame(game);
+        if (Directory.Exists(PreviousModPath(game)))
+            throw new InvalidOperationException("Сначала отключите версию на 520 записей прежним установщиком.");
         var manifest = VerifyPayload();
         var oldState = ReadState(game);
         if (oldState?.Status == "installed") throw new InvalidOperationException("Мод уже установлен.");
@@ -182,7 +187,7 @@ internal static class Operations
             if (Hash(Path.Combine(game, name)) != Expected(name))
                 throw new InvalidOperationException("Индекс игры уже изменён другим модом: " + name);
         string mod = ModPath(game), backup = Backup(game);
-        if (Directory.Exists(mod)) throw new InvalidOperationException("Папка ru_voice_separate_520 уже существует.");
+        if (Directory.Exists(mod)) throw new InvalidOperationException("Папка ru_voice_separate_525 уже существует.");
         if (oldState is null && Directory.Exists(backup))
             throw new InvalidOperationException("Папка .ru_voice_backup уже существует.");
         var state = oldState ?? new InstallState();
@@ -284,8 +289,8 @@ internal static class Operations
             throw new InvalidOperationException("EML не завершился за 15 минут.");
         }
         string output = stdout.GetAwaiter().GetResult() + stderr.GetAwaiter().GetResult();
-        if (process.ExitCode != 0 || output.Split("RU_VOICE_MAP ").Length - 1 != 520)
-            throw new InvalidOperationException("EML не создал 520 записей. " + output[^Math.Min(output.Length, 700)..]);
+        if (process.ExitCode != 0 || output.Split("RU_VOICE_MAP ").Length - 1 != 525)
+            throw new InvalidOperationException("EML не создал 525 записей. " + output[^Math.Min(output.Length, 700)..]);
     }
 
     internal static void Restore(string game, bool deleteBackup)
@@ -338,7 +343,7 @@ internal static class Operations
     }
 
     internal static string? ManagedPhase(string game) => ReadState(game)?.Status;
-    internal static bool HasLegacyMod(string game) => Directory.Exists(ModPath(game));
+    internal static bool HasLegacyMod(string game) => Directory.Exists(ModPath(game)) || Directory.Exists(PreviousModPath(game));
 }
 
 internal sealed class MainForm : Form
@@ -406,7 +411,7 @@ internal sealed class MainForm : Form
             Controls.Add(buttons[i]);
         }
         UpdateButtons();
-        Controls.Add(Theme.Label("F3 в игре: включить или выключить русскую озвучку · 520 записей",
+        Controls.Add(Theme.Label("F3 в игре: включить или выключить русскую озвучку · 525 записей",
                                  28, 424, 610, 23, color: Theme.Good));
         Controls.Add(Theme.Label("Разработчик:", 28, 451, 108, 23, color: Theme.Muted));
         var developer = new LinkLabel
