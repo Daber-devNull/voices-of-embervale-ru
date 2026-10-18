@@ -1,0 +1,10 @@
+bin/
+obj/
+publish/
+*.pdb
+*.dll
+*.exe
+payload/
+*.wav
+*.qoa
+*.zip
