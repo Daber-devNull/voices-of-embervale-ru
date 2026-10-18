@@ -31,7 +31,8 @@ def sha(path: Path) -> str:
 
 def package(directory: Path) -> tuple[int, int, str]:
     archive = directory.with_name(directory.name + ".zip")
-    files = sorted(path for path in directory.rglob("*") if path.is_file())
+    files = sorted(path for path in directory.rglob("*")
+                   if path.is_file() and ".git" not in path.relative_to(directory).parts)
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=6,
                          allowZip64=True) as output:
         for path in files:
