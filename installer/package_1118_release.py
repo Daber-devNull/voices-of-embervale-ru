@@ -24,7 +24,7 @@ def sha(path: Path) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--version", default="0.3.0-beta")
+    parser.add_argument("--version", default="0.3.1-beta")
     parser.add_argument("--mod", type=Path, default=ROOT / "local/ru_voice_separate_1118")
     args = parser.parse_args()
     mod = args.mod.resolve()
@@ -70,7 +70,7 @@ def main() -> None:
             shutil.copy2(path, dest / path.name)
     shutil.copy2(ROOT / "installer/THIRD_PARTY.md", dest / "THIRD_PARTY.md")
     shutil.copytree(ROOT / "installer/licenses", dest / "licenses")
-    release_note = ("В beta 0.3.0 добавлены 299 приветствий и прощаний персонажей с отдельными голосами. "
+    release_note = ("В beta 0.3.1 исправлена кодировка надписи F3; beta 0.3.0 добавила 299 приветствий и прощаний персонажей с отдельными голосами. "
                     "В 134 страницах с цифрами числа произносятся словами.\n\n")
     (dest / "README.md").write_text(
         f"# Голоса Эмбервейла — версия {args.version}\n\n"

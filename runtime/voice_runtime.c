@@ -52,7 +52,7 @@ static LRESULT CALLBACK status_window_proc(HWND window, UINT message, WPARAM wpa
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, RGB(138, 238, 182));
         HFONT previous = (HFONT)SelectObject(dc, status_font);
-        DrawTextW(dc, L"РУ ОЗВУЧКА: ВКЛ", -1, &area,
+        DrawTextW(dc, L"\u0420\u0423 \u041E\u0417\u0412\u0423\u0427\u041A\u0410: \u0412\u041A\u041B", -1, &area,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         SelectObject(dc, previous);
         EndPaint(window, &paint);
