@@ -1,7 +1,6 @@
-/* Version-pinned Russian voice redirection. Loaded by a native DLL proxy. */
+/* Signature-validated Russian voice redirection. Loaded by a native DLL proxy. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <bcrypt.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
@@ -10,15 +9,20 @@
 #include "MinHook.h"
 #include "guid_map.h"
 
-#define RVA_VOICE_PLAY_A 0x1214680u
-#define RVA_VOICE_PLAY_B 0x1214880u
-#define RVA_SOUND_PLAY   0x1051a40u
-
-static const unsigned char kExeSha256[32] = {
-    0x82,0xe5,0x02,0x0a,0x87,0x36,0x34,0x8c,
-    0xd0,0x37,0x4f,0x00,0x4b,0x2f,0x5e,0x5e,
-    0xf4,0x56,0xb5,0xbd,0x27,0xaa,0x54,0x20,
-    0xdf,0x34,0xc7,0xdd,0x24,0x1c,0xfe,0xeb
+/* Function entry bytes from build 1269579; scan .text instead of trusting fixed RVAs. */
+static const unsigned char kVoiceA[] = {
+    0x48,0x89,0x5c,0x24,0x10,0x48,0x89,0x74,0x24,0x18,0x48,0x89,0x7c,0x24,0x20,0x55,
+    0x41,0x54,0x41,0x55,0x41,0x56,0x41,0x57,0x48,0x8d,0x6c,0x24,0xc9,0x48,0x81,0xec,
+    0xc0,0x00,0x00,0x00,0x8b,0x71,0x28,0x33,0xc0,0x4d,0x8b,0xe8,0x4c,0x8b,0xfa,0x48
+};
+static const unsigned char kVoiceB[] = {
+    0x48,0x89,0x5c,0x24,0x10,0x48,0x89,0x74,0x24,0x18,0x48,0x89,0x7c,0x24,0x20,0x55,
+    0x41,0x54,0x41,0x55,0x41,0x56,0x41,0x57,0x48,0x8d,0x6c,0x24,0xc9,0x48,0x81,0xec,
+    0xc0,0x00,0x00,0x00,0x44,0x8b,0x71,0x10,0x33,0xc0,0x49,0x8b,0xd8,0x4c,0x8b,0xea
+};
+static const unsigned char kSoundPlay[] = {
+    0x44,0x89,0x44,0x24,0x18,0x55,0x57,0x41,0x56,0x48,0x81,0xec,0x80,0x00,0x00,0x00,
+    0x41,0x8b,0xd0,0x49,0x8b,0xf9,0x48,0x8b
 };
 
 typedef void (*VoiceA)(void *, unsigned char *, void *);
@@ -111,32 +115,28 @@ static void log_line(const char *message) {
     CloseHandle(file);
 }
 
-static int verify_executable(void) {
-    wchar_t path[MAX_PATH];
-    DWORD count = GetModuleFileNameW(NULL, path, MAX_PATH);
-    if (!count || count >= MAX_PATH) return 0;
-    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                              NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (file == INVALID_HANDLE_VALUE) return 0;
-    BCRYPT_ALG_HANDLE algorithm = NULL;
-    BCRYPT_HASH_HANDLE hash = NULL;
-    unsigned char buffer[65536];
-    unsigned char digest[32];
-    DWORD read_count;
-    int ok = 0;
-    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0) < 0) goto done;
-    if (BCryptCreateHash(algorithm, &hash, NULL, 0, NULL, 0, 0) < 0) goto done;
-    while (ReadFile(file, buffer, sizeof(buffer), &read_count, NULL) && read_count) {
-        if (BCryptHashData(hash, buffer, read_count, 0) < 0) goto done;
+static unsigned char *find_unique_code(unsigned char *base, const unsigned char *signature, size_t size) {
+    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)base;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 || dos->e_lfanew > 4096) return NULL;
+    IMAGE_NT_HEADERS64 *nt = (IMAGE_NT_HEADERS64 *)(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return NULL;
+    IMAGE_SECTION_HEADER *sections = IMAGE_FIRST_SECTION(nt);
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+        IMAGE_SECTION_HEADER *section = &sections[i];
+        if (memcmp(section->Name, ".text", 5) != 0) continue;
+        SIZE_T offset = section->VirtualAddress, length = section->Misc.VirtualSize;
+        if (offset >= nt->OptionalHeader.SizeOfImage ||
+            length > nt->OptionalHeader.SizeOfImage - offset || length < size) return NULL;
+        unsigned char *result = NULL;
+        for (SIZE_T j = 0; j <= length - size; ++j) {
+            if (base[offset + j] == signature[0] && memcmp(base + offset + j, signature, size) == 0) {
+                if (result) return NULL; /* Ambiguous signature: never hook. */
+                result = base + offset + j;
+            }
+        }
+        return result;
     }
-    if (GetLastError() != ERROR_HANDLE_EOF && read_count != 0) goto done;
-    if (BCryptFinishHash(hash, digest, sizeof(digest), 0) < 0) goto done;
-    ok = memcmp(digest, kExeSha256, sizeof(digest)) == 0;
-done:
-    if (hash) BCryptDestroyHash(hash);
-    if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
-    CloseHandle(file);
-    return ok;
+    return NULL;
 }
 
 static uint32_t sound_play_hook(void *manager, uint32_t zero, uint32_t id,
@@ -197,12 +197,16 @@ static void voice_b_hook(void *voice, unsigned char *state, void *options) {
 
 static DWORD WINAPI install_hooks(void *unused) {
     (void)unused;
-    if (!verify_executable()) {
-        log_line("Unknown enshrouded.exe SHA-256; Russian voice hooks disabled");
+    unsigned char *base = (unsigned char *)GetModuleHandleW(NULL);
+    if (!base) return 0;
+    unsigned char *voice_a = find_unique_code(base, kVoiceA, sizeof(kVoiceA));
+    unsigned char *voice_b = find_unique_code(base, kVoiceB, sizeof(kVoiceB));
+    unsigned char *sound_play = find_unique_code(base, kSoundPlay, sizeof(kSoundPlay));
+    if (!voice_a || !voice_b || !sound_play) {
+        log_line("Voice hook signature missing or ambiguous; Russian routing disabled for this game build");
         return 0;
     }
-    unsigned char *base = (unsigned char *)GetModuleHandleW(NULL);
-    if (!base || MH_Initialize() != MH_OK) {
+    if (MH_Initialize() != MH_OK) {
         log_line("MinHook initialization failed");
         return 0;
     }
@@ -211,15 +215,15 @@ static DWORD WINAPI install_hooks(void *unused) {
         log_line("TLS allocation failed");
         return 0;
     }
-    if (MH_CreateHook(base + RVA_VOICE_PLAY_A, voice_a_hook, (void **)&original_voice_a) != MH_OK ||
-        MH_CreateHook(base + RVA_VOICE_PLAY_B, voice_b_hook, (void **)&original_voice_b) != MH_OK ||
-        MH_CreateHook(base + RVA_SOUND_PLAY, sound_play_hook, (void **)&original_sound_play) != MH_OK ||
+    if (MH_CreateHook(voice_a, voice_a_hook, (void **)&original_voice_a) != MH_OK ||
+        MH_CreateHook(voice_b, voice_b_hook, (void **)&original_voice_b) != MH_OK ||
+        MH_CreateHook(sound_play, sound_play_hook, (void **)&original_sound_play) != MH_OK ||
         MH_EnableHook(MH_ALL_HOOKS) != MH_OK) {
         MH_DisableHook(MH_ALL_HOOKS);
         log_line("Voice hook installation failed");
         return 0;
     }
-    log_line("Russian voice hooks active for pinned Enshrouded build");
+    log_line("Russian voice hooks active after unique signature validation");
     status_window = create_status_window();
     if (!status_window) log_line("Russian voice status overlay unavailable");
     if (RegisterHotKey(NULL, 0x5255, MOD_NOREPEAT, VK_F3)) {

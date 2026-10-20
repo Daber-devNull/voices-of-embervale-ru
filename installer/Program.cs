@@ -1,6 +1,9 @@
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Windows.Forms;
 
 namespace RuVoiceInstaller;
@@ -22,11 +25,52 @@ internal sealed class InstallState
     public Dictionary<string, long> DatLengthsBefore { get; set; } = new();
 }
 
+internal static class DiagnosticLog
+{
+    private static readonly object Gate = new();
+    internal const string FileName = "ru_voice_installer.log";
+
+    internal static void Write(string game, string message)
+    {
+        if (!Directory.Exists(game)) return;
+        lock (Gate)
+        {
+            string file = Path.Combine(game, FileName);
+            if (File.Exists(file) && new FileInfo(file).Length > 2_000_000)
+                File.Move(file, Path.Combine(game, "ru_voice_installer.previous.log"), true);
+            File.AppendAllText(file, $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz}] {message.Replace('\r', ' ').Replace('\n', ' ')}{Environment.NewLine}");
+        }
+    }
+
+    internal static T Run<T>(string game, string action, Func<T> operation)
+    {
+        Write(game, "START " + action);
+        try
+        {
+            T result = operation();
+            Write(game, "OK " + action);
+            return result;
+        }
+        catch (Exception error)
+        {
+            Write(game, "FAIL " + action + ": " + error);
+            throw;
+        }
+    }
+}
+
 internal static class Operations
 {
-    internal const string ExeHash = "82e5020a8736348cd0374f004b2f5e5ef456b5bd27aa5420df34c7dd241cfeeb";
-    internal const string KfcHash = "a030bcdb58a089f84dd00fb0c6939fd492a2dff440bcb5b63f70efc44b1b9320";
-    internal const string ResourcesHash = "cf47db07ae2a959c22e88c661c8e7318a283e3ea063b7a74570ada6a5af9467b";
+    internal const int MinimumBuild = 1269579;
+    private static readonly Regex GameVersionPattern = new(
+        @"(?<!\d)(?<build>\d{6,10})\|\^/game\d+/branches/release_(?<major>\d+)\.(?<minor>\d+)\|[^\x00\r\n]{1,100}",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    private static readonly byte[][] HookSignatures =
+    [
+        Convert.FromHexString("48895C2410488974241848897C2420554154415541564157488D6C24C94881ECC00000008B712833C04D8BE84C8BFA48"),
+        Convert.FromHexString("48895C2410488974241848897C2420554154415541564157488D6C24C94881ECC0000000448B711033C0498BD84C8BEA"),
+        Convert.FromHexString("4489442418555741564881EC80000000418BD0498BF9488B")
+    ];
     private static readonly string[] IndexFiles = ["enshrouded.kfc", "enshrouded.kfc_resources"];
     private static readonly string[] DllFiles = ["dbghelp.dll", "winmm.dll", "shroudtopia.dll"];
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true, PropertyNameCaseInsensitive = true };
@@ -36,7 +80,59 @@ internal static class Operations
     private static string StatePath(string game) => Path.Combine(Backup(game), "state.json");
     private static string ModPath(string game) => Path.Combine(game, "mods", "ru_voice_separate_525");
     private static string PreviousModPath(string game) => Path.Combine(game, "mods", "ru_voice_separate_520");
-    private static string Expected(string name) => name == "enshrouded.kfc" ? KfcHash : ResourcesHash;
+
+    private static string VersionFromIndex(string index)
+    {
+        if (!File.Exists(index)) throw new InvalidOperationException("Не найден индекс enshrouded.kfc.");
+        // The version is stored as plain ASCII in the KFC index, including EML-patched indices.
+        string data = Encoding.ASCII.GetString(File.ReadAllBytes(index));
+        var versions = GameVersionPattern.Matches(data).Select(x => x.Value).Distinct().ToArray();
+        if (versions.Length != 1)
+            throw new InvalidOperationException("Не удалось однозначно определить версию игрового индекса.");
+        var match = GameVersionPattern.Match(versions[0]);
+        if (!int.TryParse(match.Groups["build"].Value, out int build) ||
+            !int.TryParse(match.Groups["major"].Value, out int major) ||
+            !int.TryParse(match.Groups["minor"].Value, out int minor) ||
+            major < 1 || build < MinimumBuild)
+            throw new InvalidOperationException($"Сборка игры {match.Groups["build"].Value} старше минимальной {MinimumBuild}.");
+        return versions[0];
+    }
+
+    internal static string GameVersion(string game) => VersionFromIndex(Path.Combine(game, "enshrouded.kfc"));
+
+    private static void CheckRuntimeSignatures(string exePath)
+    {
+        byte[] exe = File.ReadAllBytes(exePath);
+        if (exe.Length < 0x100 || BinaryPrimitives.ReadUInt16LittleEndian(exe) != 0x5a4d)
+            throw new InvalidOperationException("enshrouded.exe не является ожидаемым PE-файлом.");
+        int pe = BinaryPrimitives.ReadInt32LittleEndian(exe.AsSpan(0x3c));
+        if (pe < 0 || pe > exe.Length - 24 || BinaryPrimitives.ReadUInt32LittleEndian(exe.AsSpan(pe)) != 0x4550)
+            throw new InvalidOperationException("Неверный заголовок enshrouded.exe.");
+        int count = BinaryPrimitives.ReadUInt16LittleEndian(exe.AsSpan(pe + 6));
+        int optionalSize = BinaryPrimitives.ReadUInt16LittleEndian(exe.AsSpan(pe + 20));
+        int sections = pe + 24 + optionalSize;
+        if (count <= 0 || count > 96 || sections < 0 || sections > exe.Length - count * 40)
+            throw new InvalidOperationException("Неверная таблица секций enshrouded.exe.");
+        ReadOnlySpan<byte> code = default;
+        for (int i = 0; i < count; i++)
+        {
+            var section = exe.AsSpan(sections + i * 40, 40);
+            if (!section[..5].SequenceEqual(".text"u8)) continue;
+            uint length = BinaryPrimitives.ReadUInt32LittleEndian(section[16..]);
+            uint offset = BinaryPrimitives.ReadUInt32LittleEndian(section[20..]);
+            if (offset > exe.Length || length > exe.Length - offset)
+                throw new InvalidOperationException("Секция кода enshrouded.exe повреждена.");
+            code = exe.AsSpan((int)offset, (int)length);
+            break;
+        }
+        if (code.IsEmpty) throw new InvalidOperationException("Секция кода enshrouded.exe не найдена.");
+        for (int i = 0; i < HookSignatures.Length; i++)
+        {
+            int first = code.IndexOf(HookSignatures[i]);
+            if (first < 0 || code[(first + 1)..].IndexOf(HookSignatures[i]) >= 0)
+                throw new InvalidOperationException($"Аудиофункция {i + 1} в enshrouded.exe изменилась или неоднозначна. Установка остановлена.");
+        }
+    }
 
     internal static string Hash(string path)
     {
@@ -56,8 +152,15 @@ internal static class Operations
     {
         if (!File.Exists(Path.Combine(game, "enshrouded.exe")))
             throw new InvalidOperationException("В указанной папке нет enshrouded.exe.");
-        if (Hash(Path.Combine(game, "enshrouded.exe")) != ExeHash)
-            throw new InvalidOperationException("Версия игры не поддерживается. Установщик ничего не изменил.");
+        string version = GameVersion(game);
+        if (!File.Exists(Path.Combine(game, "enshrouded.kfc_resources")))
+            throw new InvalidOperationException("Не найден индекс enshrouded.kfc_resources.");
+        CheckRuntimeSignatures(Path.Combine(game, "enshrouded.exe"));
+        DiagnosticLog.Write(game, "Game version: " + version);
+        DiagnosticLog.Write(game, "Three unique runtime hook signatures confirmed");
+        DiagnosticLog.Write(game, "enshrouded.exe SHA-256: " + Hash(Path.Combine(game, "enshrouded.exe")));
+        foreach (string name in IndexFiles)
+            DiagnosticLog.Write(game, name + " SHA-256: " + Hash(Path.Combine(game, name)));
     }
 
     private static string SafePayloadPath(string name)
@@ -149,9 +252,7 @@ internal static class Operations
         {
             if (Directory.Exists(ModPath(game)))
                 return "Найден прежний тестовый мод. Перед установкой пакета требуется его штатный откат.";
-            if (IndexFiles.Any(name => !File.Exists(Path.Combine(game, name)) || Hash(Path.Combine(game, name)) != Expected(name)))
-                return "Мод не зарегистрирован, но индекс игры изменён. Нужна проверка перед установкой.";
-            return "Совместимая игра. Мод не установлен.";
+            return "Сборка не старше минимальной. При установке будут проверены 1118 звуковых ссылок.";
         }
         if (state.Status == "restored") return "Оригинал восстановлен. Резервная копия сохранена.";
         if (state.Status != "installed") return "Неизвестное состояние установщика.";
@@ -186,14 +287,21 @@ internal static class Operations
         if (oldState is not null && oldState.Status != "restored")
             throw new InvalidOperationException("Неизвестное состояние резервной копии.");
         foreach (string name in IndexFiles)
-            if (Hash(Path.Combine(game, name)) != Expected(name))
-                throw new InvalidOperationException("Индекс игры уже изменён другим модом: " + name);
+            if (!File.Exists(Path.Combine(game, name)))
+                throw new InvalidOperationException("Не найден игровой индекс: " + name);
+        string loaderBackup = Path.Combine(game, "enshrouded.kfc.bak");
+        if (File.Exists(loaderBackup) && Hash(loaderBackup) != Hash(Path.Combine(game, "enshrouded.kfc")))
+        {
+            string backupVersion = VersionFromIndex(loaderBackup);
+            if (backupVersion == GameVersion(game))
+                throw new InvalidOperationException("Найден индекс, уже изменённый другим модом. Установка остановлена; подробности в журнале.");
+        }
         string mod = ModPath(game), backup = Backup(game);
         if (Directory.Exists(mod)) throw new InvalidOperationException("Папка ru_voice_separate_525 уже существует.");
         if (oldState is null && Directory.Exists(backup))
             throw new InvalidOperationException("Папка .ru_voice_backup уже существует.");
         var state = oldState ?? new InstallState();
-        state.GameExeHash = ExeHash;
+        state.GameExeHash = Hash(Path.Combine(game, "enshrouded.exe"));
         state.DatLengthsBefore = DatLengths(game);
         state.OwnedDlls.Clear();
         state.ModifiedDats.Clear();
@@ -204,9 +312,13 @@ internal static class Operations
         {
             string source = Path.Combine(game, name), target = Path.Combine(backup, name);
             if (oldState is null) File.Copy(source, target, false);
-            if (Hash(target) != Expected(name)) throw new InvalidOperationException("Резервная копия не прошла проверку.");
-            state.Original[name] = Expected(name);
+            else if (oldState.Status == "restored" && Hash(target) != Hash(source))
+                File.Copy(source, target, true);
+            string originalHash = Hash(source);
+            if (Hash(target) != originalHash) throw new InvalidOperationException("Резервная копия не прошла проверку.");
+            state.Original[name] = originalHash;
         }
+        if (oldState is not null) SaveState(game, state);
         try
         {
             foreach (var item in manifest.Files.Where(x => x.Key.StartsWith("mod/", StringComparison.Ordinal)))
@@ -245,8 +357,9 @@ internal static class Operations
             state.Status = "installed";
             SaveState(game, state);
         }
-        catch
+        catch (Exception error)
         {
+            DiagnosticLog.Write(game, "Install failed; restoring original indices: " + error.Message);
             foreach (string name in IndexFiles)
                 File.Copy(Path.Combine(backup, name), Path.Combine(game, name), true);
             foreach (var item in DatLengths(game))
@@ -266,6 +379,12 @@ internal static class Operations
                 if (File.Exists(target) && Hash(target) == item.Value) File.Delete(target);
             }
             if (oldState is null && Directory.Exists(backup)) Directory.Delete(backup, true);
+            if (oldState is not null)
+            {
+                state.Status = "restored";
+                SaveState(game, state);
+            }
+            DiagnosticLog.Write(game, "Rollback complete");
             throw;
         }
     }
@@ -291,8 +410,12 @@ internal static class Operations
             throw new InvalidOperationException("EML не завершился за 15 минут.");
         }
         string output = stdout.GetAwaiter().GetResult() + stderr.GetAwaiter().GetResult();
+        DiagnosticLog.Write(game, $"EML exit={process.ExitCode}, mapped={output.Split("RU_VOICE_MAP ").Length - 1}");
         if (process.ExitCode != 0 || output.Split("RU_VOICE_MAP ").Length - 1 != 1118)
+        {
+            DiagnosticLog.Write(game, "EML failure tail: " + output[^Math.Min(output.Length, 4000)..]);
             throw new InvalidOperationException("EML не создал 1118 записей. " + output[^Math.Min(output.Length, 700)..]);
+        }
     }
 
     internal static void Restore(string game, bool deleteBackup)
@@ -305,8 +428,10 @@ internal static class Operations
         if (state.Status == "installed")
         {
             CheckModFiles(game, state);
+            if (GameVersion(game) != VersionFromIndex(Path.Combine(backup, "enshrouded.kfc")))
+                throw new InvalidOperationException("Игра обновилась после установки мода. Старую копию индекса нельзя безопасно восстановить поверх новой сборки.");
             foreach (string name in IndexFiles)
-                if (!File.Exists(Path.Combine(backup, name)) || Hash(Path.Combine(backup, name)) != Expected(name))
+                if (!File.Exists(Path.Combine(backup, name)) || Hash(Path.Combine(backup, name)) != state.Original[name])
                     throw new InvalidOperationException("Резервная копия повреждена: " + name);
             if (IndexFiles.Any(name => !File.Exists(Path.Combine(game, name)) ||
                                        Hash(Path.Combine(game, name)) != state.Patched[name]) &&
@@ -338,7 +463,7 @@ internal static class Operations
         {
             if (state.Status != "restored") throw new InvalidOperationException("Восстановление не завершено.");
             foreach (string name in IndexFiles)
-                if (Hash(Path.Combine(backup, name)) != Expected(name))
+                if (Hash(Path.Combine(backup, name)) != state.Original[name])
                     throw new InvalidOperationException("Резервная копия изменилась.");
             Directory.Delete(backup, true);
         }
@@ -359,86 +484,156 @@ internal sealed class MainForm : Form
     internal MainForm()
     {
         Text = "Голоса Эмбервейла — управление модом";
-        ClientSize = new Size(760, 482);
-        MinimumSize = new Size(760, 482);
-        MaximizeBox = false;
+        ClientSize = new Size(760, 540);
+        MinimumSize = new Size(440, 320);
+        AutoScaleMode = AutoScaleMode.Dpi;
+        StartPosition = FormStartPosition.CenterScreen;
         BackColor = Theme.Background;
         ForeColor = Theme.Text;
         Font = new Font("Segoe UI", 10);
         Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         Theme.DarkTitleBar(this);
-        Controls.Add(Theme.Label("РУССКАЯ ОЗВУЧКА", 28, 22, 690, 42, 22, true));
-        Controls.Add(Theme.Label("Голоса Эмбервейла · управление модом Enshrouded", 29, 65, 690, 25,
-                                 color: Theme.Muted));
-        Controls.Add(Theme.Label("Папка игры", 28, 109, 690, 26, 11, true));
-        Controls.Add(Theme.Label("Укажите папку, внутри которой лежит enshrouded.exe. Сам файл выбирать не нужно.",
-                                 28, 136, 700, 23, color: Theme.Muted));
-        var inputFrame = new Panel { Location = new Point(28, 168), Size = new Size(548, 40), BackColor = Theme.Input };
-        path.SetBounds(10, 9, 528, 24);
+
+        var viewport = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = Theme.Background };
+        Controls.Add(viewport);
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1, Padding = new Padding(24, 16, 24, 18), BackColor = Theme.Background
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        viewport.Controls.Add(layout);
+        void Add(Control control, int top = 0, int bottom = 0)
+        {
+            control.Dock = DockStyle.Top;
+            control.Margin = new Padding(0, top, 0, bottom);
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.Controls.Add(control, 0, layout.RowCount++);
+        }
+        Label NewLabel(string text, float size, bool bold = false, Color? color = null)
+            => new()
+            {
+                Text = text, AutoSize = true, BackColor = Color.Transparent,
+                ForeColor = color ?? Theme.Text,
+                Font = new Font("Segoe UI", size, bold ? FontStyle.Bold : FontStyle.Regular)
+            };
+        var heading = NewLabel("РУССКАЯ ОЗВУЧКА", 21, true);
+        var subtitle = NewLabel("Голоса Эмбервейла · управление модом Enshrouded", 10, color: Theme.Muted);
+        var folderLabel = NewLabel("Папка игры", 11, true);
+        var hint = NewLabel("Укажите папку, внутри которой лежит enshrouded.exe. Сам файл выбирать не нужно.", 9, color: Theme.Muted);
+        Add(heading, bottom: 2);
+        Add(subtitle, bottom: 18);
+        Add(folderLabel, bottom: 3);
+        Add(hint, bottom: 11);
+
+        var inputRow = new TableLayoutPanel { AutoSize = true, ColumnCount = 2, RowCount = 1 };
+        inputRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        inputRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        var inputFrame = new Panel { Height = 44, BackColor = Theme.Input, Dock = DockStyle.Fill, Margin = new Padding(0, 0, 8, 0) };
+        path.Dock = DockStyle.Fill;
+        path.Margin = new Padding(8, 8, 8, 6);
         path.BackColor = Theme.Input;
         path.ForeColor = Theme.Text;
         path.BorderStyle = BorderStyle.None;
         path.Text = File.Exists(settingsPath) ? File.ReadAllText(settingsPath).Trim() : FindGame();
         path.TextChanged += (_, _) => UpdateButtons();
         inputFrame.Controls.Add(path);
-        Controls.Add(inputFrame);
-        var browse = new DarkButton { Text = "Выбрать папку", Location = new Point(586, 168), Size = new Size(146, 40) };
+        var browse = new DarkButton { Text = "Выбрать папку", Height = 44, Width = 154, Margin = Padding.Empty };
         browse.Click += (_, _) =>
         {
             using var dialog = new DarkFolderPicker(path.Text.Trim());
             if (dialog.ShowDialog(this) == DialogResult.OK) path.Text = dialog.SelectedPath;
         };
-        Controls.Add(browse);
-        var card = new Panel { Location = new Point(28, 229), Size = new Size(704, 66), BackColor = Theme.Surface };
-        card.Controls.Add(Theme.Label("СОСТОЯНИЕ", 16, 8, 660, 19, 8, true, Theme.Muted));
-        status.Location = new Point(16, 29);
-        status.Size = new Size(670, 28);
+        inputRow.Controls.Add(inputFrame, 0, 0);
+        inputRow.Controls.Add(browse, 1, 0);
+        Add(inputRow, bottom: 18);
+
+        var card = new TableLayoutPanel
+        {
+            AutoSize = true, ColumnCount = 1, Padding = new Padding(15, 11, 15, 12),
+            BackColor = Theme.Surface
+        };
+        card.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        card.Controls.Add(NewLabel("СОСТОЯНИЕ", 8, true, Theme.Muted), 0, 0);
+        status.AutoSize = true;
+        status.Margin = new Padding(0, 5, 0, 0);
         status.ForeColor = Theme.Text;
         status.BackColor = Color.Transparent;
         status.Text = "Нажмите «Проверить состояние».";
-        card.Controls.Add(status);
-        Controls.Add(card);
+        card.Controls.Add(status, 0, 1);
+        Add(card, bottom: 16);
+
         string[] labels = ["Установить мод", "Проверить состояние", "Отключить · копию сохранить", "Удалить мод и копию"];
-        Action<string>[] actions = [Operations.Install, p => status.Text = Operations.Status(p),
+        Action<string>[] actions = [Operations.Install, p => { Operations.Status(p); },
                                     p => Operations.Restore(p, false), p => Operations.Restore(p, true)];
+        var buttonGrid = new TableLayoutPanel { AutoSize = true, ColumnCount = 2, RowCount = 2 };
         for (int i = 0; i < 4; ++i)
         {
             int index = i;
             buttons[i] = new DarkButton
             {
-                Text = labels[i], Location = new Point(28 + (i % 2) * 357, 314 + (i / 2) * 55),
-                Size = new Size(347, 44), Accent = i == 0, Destructive = i == 3
+                Text = labels[i], Height = 48, Dock = DockStyle.Fill,
+                Margin = new Padding(0, 0, 8, 8), Accent = i == 0, Destructive = i == 3
             };
             buttons[i].Click += async (_, _) => await Execute(labels[index], actions[index]);
-            Controls.Add(buttons[i]);
         }
+        void LayoutButtons()
+        {
+            int available = Math.Max(1, viewport.ClientSize.Width - 48);
+            int required = buttons.Max(b => TextRenderer.MeasureText(b.Text, b.Font).Width + 36);
+            bool twoColumns = available >= required * 2 + 12;
+            buttonGrid.SuspendLayout();
+            buttonGrid.Controls.Clear();
+            buttonGrid.ColumnStyles.Clear();
+            buttonGrid.RowStyles.Clear();
+            buttonGrid.ColumnCount = twoColumns ? 2 : 1;
+            buttonGrid.RowCount = twoColumns ? 2 : 4;
+            for (int i = 0; i < buttonGrid.ColumnCount; i++)
+                buttonGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / buttonGrid.ColumnCount));
+            for (int i = 0; i < buttonGrid.RowCount; i++)
+                buttonGrid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            for (int i = 0; i < buttons.Length; i++)
+            {
+                buttons[i].Height = Math.Max(48, buttons[i].Font.Height + 20);
+                buttonGrid.Controls.Add(buttons[i], twoColumns ? i % 2 : 0, twoColumns ? i / 2 : i);
+            }
+            buttonGrid.ResumeLayout();
+            int textWidth = Math.Max(100, available - 32);
+            foreach (var label in new[] { heading, subtitle, folderLabel, hint, status })
+                label.MaximumSize = new Size(textWidth, 0);
+        }
+        viewport.Resize += (_, _) => LayoutButtons();
+        Add(buttonGrid, bottom: 12);
         UpdateButtons();
-        Controls.Add(Theme.Label("F3 в игре: русская озвучка · 525 страниц и 593 реплики персонажей",
-                                 28, 424, 610, 23, color: Theme.Good));
-        Controls.Add(Theme.Label("Разработчик:", 28, 451, 108, 23, color: Theme.Muted));
+        Add(NewLabel("F3 в игре: русская озвучка · 525 страниц и 593 реплики персонажей", 9, color: Theme.Good), bottom: 7);
+        Add(NewLabel("Журнал диагностики: ru_voice_installer.log в папке игры", 9, color: Theme.Muted), bottom: 7);
+        var footer = new FlowLayoutPanel { AutoSize = true, WrapContents = true, BackColor = Theme.Background };
+        footer.Controls.Add(NewLabel("Разработчик: ", 9, color: Theme.Muted));
         var developer = new LinkLabel
         {
-            Text = "Daber (Hypeber)", Location = new Point(136, 451), Size = new Size(160, 23),
+            Text = "Daber (Hypeber)", AutoSize = true,
             LinkColor = Color.FromArgb(164, 174, 255), ActiveLinkColor = Theme.Text,
             VisitedLinkColor = Color.FromArgb(164, 174, 255), BackColor = Color.Transparent
         };
         developer.LinkClicked += (_, _) =>
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("https://github.com/Daber-devNull")
             { UseShellExecute = true });
-        Controls.Add(developer);
+        footer.Controls.Add(developer);
         var about = new LinkLabel
         {
-            Text = "О программе", Location = new Point(650, 451), Size = new Size(90, 23),
+            Text = "О программе", AutoSize = true, Margin = new Padding(16, 0, 0, 0),
             LinkColor = Theme.Muted, ActiveLinkColor = Theme.Text,
             VisitedLinkColor = Theme.Muted, BackColor = Color.Transparent
         };
         about.LinkClicked += (_, _) => Theme.ShowAbout(this);
-        Controls.Add(about);
+        footer.Controls.Add(about);
+        Add(footer);
+        LayoutButtons();
         Shown += async (_, _) =>
         {
             if (Directory.Exists(path.Text.Trim()))
             {
-                try { status.Text = await Task.Run(() => Operations.Status(path.Text.Trim())); }
+                try { status.Text = await Task.Run(() => DiagnosticLog.Run(path.Text.Trim(), "status", () => Operations.Status(path.Text.Trim()))); }
                 catch (Exception error) { status.Text = error.Message; }
             }
         };
@@ -453,12 +648,12 @@ internal sealed class MainForm : Form
             string game = Path.GetFullPath(path.Text.Trim());
             Directory.CreateDirectory(Path.GetDirectoryName(settingsPath)!);
             File.WriteAllText(settingsPath, game);
-            await Task.Run(() => action(game));
-            status.Text = Operations.Status(game);
+            await Task.Run(() => DiagnosticLog.Run(game, label, () => { action(game); return true; }));
+            status.Text = await Task.Run(() => DiagnosticLog.Run(game, "status", () => Operations.Status(game)));
         }
         catch (Exception error)
         {
-            status.Text = "Действие не завершено: " + error.Message;
+            status.Text = "Действие не завершено: " + error.Message + " Журнал: ru_voice_installer.log";
             Theme.ShowError(this, error.Message);
         }
         finally { foreach (var button in buttons) button.Enabled = true; }
@@ -489,12 +684,13 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
-        if (args.Length == 2 && args[0] is "--install" or "--restore")
+        if (args.Length == 2 && args[0] is "--install" or "--restore" or "--diagnose")
         {
             try
             {
-                if (args[0] == "--install") Operations.Install(args[1]);
-                else Operations.Restore(args[1], false);
+                if (args[0] == "--install") DiagnosticLog.Run(args[1], "cli install", () => { Operations.Install(args[1]); return true; });
+                else if (args[0] == "--restore") DiagnosticLog.Run(args[1], "cli restore", () => { Operations.Restore(args[1], false); return true; });
+                else Console.WriteLine(DiagnosticLog.Run(args[1], "cli diagnose", () => Operations.Status(args[1])));
             }
             catch (Exception error)
             {
