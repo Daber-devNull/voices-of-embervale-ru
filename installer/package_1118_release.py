@@ -23,9 +23,9 @@ def sha(path: Path) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--version", default="0.3.2-beta")
-    parser.add_argument("--publish", type=Path, default=ROOT / "installer/publish-0.3.2")
-    parser.add_argument("--mod", type=Path, default=ROOT / "local/ru_voice_separate_1118")
+    parser.add_argument("--version", default="0.3.3-beta")
+    parser.add_argument("--publish", type=Path, default=ROOT / "installer/publish-0.3.3")
+    parser.add_argument("--mod", type=Path, default=ROOT / "local/compat-20261103/mod")
     args = parser.parse_args()
     mod = args.mod.resolve()
     dest = ROOT / "release" / f"Voices-of-Embervale-RU-{args.version}-Nexus"
@@ -52,6 +52,11 @@ def main() -> None:
     if len(list((mod / "audio").glob("*.bin"))) != 1711:
         raise ValueError("Expected 1711 audio files")
 
+    for entry in mod_manifest.get("collector_overrides", []):
+        audio = mod / "audio" / entry["audio"]
+        if audio.stat().st_size != entry["bytes"] or sha(audio) != entry["sha256"]:
+            raise ValueError(f"Collector audio mismatch: {audio}")
+
     payload = dest / "payload"
     shutil.copytree(mod, payload / "mod")
     shutil.copytree(OLD / "native", payload / "native")
@@ -59,8 +64,9 @@ def main() -> None:
     shutil.copy2(DLL, payload / "native/shroudtopia.dll")
     files = sorted(path for path in payload.rglob("*") if path.is_file())
     hashes = {path.relative_to(payload).as_posix(): sha(path) for path in files}
-    if len(hashes) != 1718:
-        raise ValueError(f"Expected 1718 payload files, got {len(hashes)}")
+    expected_files = 1718 + len(mod_manifest.get("collector_overrides", []))
+    if len(hashes) != expected_files:
+        raise ValueError(f"Expected {expected_files} payload files, got {len(hashes)}")
     (payload / "manifest.json").write_text(
         json.dumps({"files": hashes}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )

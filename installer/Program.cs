@@ -177,7 +177,7 @@ internal static class Operations
         string manifestPath = Path.Combine(Payload, "manifest.json");
         var manifest = JsonSerializer.Deserialize<PayloadManifest>(File.ReadAllText(manifestPath), JsonOptions)
                        ?? throw new InvalidOperationException("Манифест пакета пуст.");
-        if (manifest.Files.Count != 1718) throw new InvalidOperationException("Пакет озвучки неполный.");
+        if (manifest.Files.Count != 1764) throw new InvalidOperationException("Пакет озвучки неполный.");
         foreach (var item in manifest.Files)
             if (!File.Exists(SafePayloadPath(item.Key)) || Hash(SafePayloadPath(item.Key)) != item.Value)
                 throw new InvalidOperationException("Пакет повреждён: " + item.Key);
@@ -195,6 +195,29 @@ internal static class Operations
         string target = StatePath(game), temp = target + ".tmp";
         File.WriteAllText(temp, JsonSerializer.Serialize(state, JsonOptions));
         File.Move(temp, target, true);
+    }
+
+    // Retain orphaned mod DATs left by a failed loader run, never game-referenced containers.
+    private static void PreserveUnreferencedModDats(string game)
+    {
+        byte[] index = File.ReadAllBytes(Path.Combine(game, "enshrouded.kfc"));
+        if (index.Length < 144 || Encoding.ASCII.GetString(index, 0, 4) != "KFC4")
+            throw new InvalidOperationException("Неизвестный формат игрового индекса.");
+        uint relative = BinaryPrimitives.ReadUInt32LittleEndian(index.AsSpan(80, 4));
+        uint count = BinaryPrimitives.ReadUInt32LittleEndian(index.AsSpan(84, 4));
+        long start = 80L + relative;
+        if (start < 0 || start + count * 16L > index.Length) throw new InvalidOperationException("Повреждена таблица DAT.");
+        var used = new HashSet<int>();
+        for (uint i = 0; i < count; i++) used.Add(BinaryPrimitives.ReadUInt16LittleEndian(index.AsSpan(checked((int)(start + i * 16L + 6)), 2)));
+        string archive = Path.Combine(game, ".ru_voice_orphan_dats", DateTime.Now.ToString("yyyyMMdd-HHmmss-ffff"));
+        foreach (string file in Directory.GetFiles(game, "enshrouded_*.dat"))
+        {
+            string number = Path.GetFileNameWithoutExtension(file)["enshrouded_".Length..];
+            if (!int.TryParse(number, out int container) || container < 55 || used.Contains(container) || new FileInfo(file).Length == 0) continue;
+            Directory.CreateDirectory(archive);
+            File.Move(file, Path.Combine(archive, Path.GetFileName(file)));
+            DiagnosticLog.Write(game, "Preserved unreferenced mod DAT: " + file + " -> " + archive);
+        }
     }
 
     private static Dictionary<string, long> DatLengths(string game) =>
@@ -302,6 +325,7 @@ internal static class Operations
             throw new InvalidOperationException("Папка .ru_voice_backup уже существует.");
         var state = oldState ?? new InstallState();
         state.GameExeHash = Hash(Path.Combine(game, "enshrouded.exe"));
+        PreserveUnreferencedModDats(game);
         state.DatLengthsBefore = DatLengths(game);
         state.OwnedDlls.Clear();
         state.ModifiedDats.Clear();
@@ -410,11 +434,12 @@ internal static class Operations
             throw new InvalidOperationException("EML не завершился за 15 минут.");
         }
         string output = stdout.GetAwaiter().GetResult() + stderr.GetAwaiter().GetResult();
+        output = Regex.Replace(output, @"\[[0-?]*[ -/]*[@-~]", string.Empty);
         DiagnosticLog.Write(game, $"EML exit={process.ExitCode}, mapped={output.Split("RU_VOICE_MAP ").Length - 1}");
         if (process.ExitCode != 0 || output.Split("RU_VOICE_MAP ").Length - 1 != 1118)
         {
             DiagnosticLog.Write(game, "EML failure tail: " + output[^Math.Min(output.Length, 4000)..]);
-            throw new InvalidOperationException("EML не создал 1118 записей. " + output[^Math.Min(output.Length, 700)..]);
+            throw new InvalidOperationException("Не удалось подключить все 1118 записей озвучки. Подробности: ru_voice_installer.log. " + output[^Math.Min(output.Length, 700)..]);
         }
     }
 

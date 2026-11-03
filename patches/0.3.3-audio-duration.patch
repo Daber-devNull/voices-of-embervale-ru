@@ -1,0 +1,82 @@
+--- a/mods/ru_voice_separate_525/src/mod.lua
++++ b/mods/ru_voice_separate_525/src/mod.lua
+@@ -123,24 +123,25 @@
+   ["1e0d34fd-895e-527f-b7c4-c37d85ff4fca"] = {frames=1158238, bytes=463296, ns=24129958333, file="audio/collector/quest-08024.frameless-qoa.bin"},
+   ["b3cc1f4d-11b7-541a-8e5c-1e9f0850b6a8"] = {frames=1961838, bytes=784736, ns=40871625000, file="audio/collector/quest-03091.frameless-qoa.bin"},
+ }
+-local function load_russian_audio(russian, file, expected_bytes)
++local function load_russian_audio(russian, file, expected_bytes, expected_frames)
+   local update = collector_updates[tostring(russian.guid)]
+   local content = game.assets.create_content(io.read(update and update.file or file))
+   assert(content.size == (update and update.bytes or expected_bytes), 'RU voice: replacement size changed')
+-  if update then
+-    russian.data.frameCount = update.frames
+-    russian.data.duration.value = update.ns
+-    print('RU_COLLECTOR_SOUND ' .. tostring(russian.guid) .. ' ' .. update.frames)
+-  end
++  local frames = update and update.frames or expected_frames
++  assert(frames and frames > 0 and content.size == math.floor((frames + 19) / 20) * 8, 'RU voice: invalid replacement frame count')
++  russian.data.framesPerSecond = 48000
++  russian.data.frameCount = frames
++  russian.data.duration.value = update and update.ns or math.floor(frames / 48000 * 1000000000 + 0.5)
++  if update then print('RU_COLLECTOR_SOUND ' .. tostring(russian.guid) .. ' ' .. update.frames) end
+   return content
+ end
+ 
+ local function add_russian(name, voice_guid, sound_guid, container_guid, frames, bytes, file)
+   local english = sounds[name]
+   assert(english, 'RU separate voice: missing or ambiguous sound: ' .. name)
+-  assert(english.data.framesPerSecond == 48000 and english.data.frameCount == frames, 'RU separate voice: format changed')
++  assert(english.data.framesPerSecond == 48000, 'RU separate voice: format changed')
+   local original_content = game.assets.get_content(english.data.streamedData.hash)
+-  assert(original_content and original_content.size == bytes, 'RU separate voice: source content changed')
++  assert(original_content and original_content.size > 0, 'RU separate voice: source content changed')
+   local voice = game.assets.get_resource(voice_guid, 'keen::VoiceoverResource', 0)
+   assert(voice and tostring(voice.data.languages[1]) ~= empty, 'RU separate voice: missing voice resource')
+   local container = game.assets.get_resource(voice.data.languages[1], 'keen::SoundContainerResource', 0)
+@@ -149,7 +150,7 @@
+   for index = 1, 5 do original[index] = tostring(voice.data.languages[index]) end
+   local russian = game.assets.create_resource(english.data, 'keen::SoundResource', sound_guid, 0)
+   russian.data.debugName = 'RU_' .. string.sub(name, 4)
+-  local content = load_russian_audio(russian, file, bytes)
++  local content = load_russian_audio(russian, file, bytes, frames)
+   russian.data.streamedData.hash = content
+   local russian_container = game.assets.create_resource(container.data, 'keen::SoundContainerResource', container_guid, 0)
+   russian_container.data.entries[1].value.sound = russian.guid
+@@ -960,12 +961,12 @@
+   for index, take in ipairs(takes) do
+     local english = sounds[take[1]]
+     assert(english and tostring(container.data.entries[index].value.sound) == tostring(english.guid), 'RU NPC variants: changed source take')
+-    assert(english.data.framesPerSecond == 48000 and english.data.frameCount == take[3], 'RU NPC variants: changed format')
++    assert(english.data.framesPerSecond == 48000, 'RU NPC variants: changed format')
+     local original_content = game.assets.get_content(english.data.streamedData.hash)
+-    assert(original_content and original_content.size == take[4], 'RU NPC variants: changed source content')
++    assert(original_content and original_content.size > 0, 'RU NPC variants: changed source content')
+     local russian = game.assets.create_resource(english.data, 'keen::SoundResource', take[2], 0)
+     russian.data.debugName = 'RU_' .. take[1]
+-    local content = load_russian_audio(russian, take[5], take[4])
++    local content = load_russian_audio(russian, take[5], take[4], take[3])
+     russian.data.streamedData.hash = content
+     russian_container.data.entries[index].value.sound = russian.guid
+   end
+@@ -1007,17 +1008,17 @@
+   for index, take in ipairs(takes) do
+     local english = assert(sounds[take[1]], 'RU NPC multi: missing sound')
+     assert(tostring(container.data.entries[index].value.sound) == tostring(english.guid), 'RU NPC multi: take order changed')
+-    assert(english.data.framesPerSecond == 48000 and english.data.frameCount == take[3], 'RU NPC multi: sound format changed')
++    assert(english.data.framesPerSecond == 48000, 'RU NPC multi: sound format changed')
+     if take[6] == 'streamed' then
+       local original_content = game.assets.get_content(english.data.streamedData.hash)
+-      assert(original_content and original_content.size == take[4], 'RU NPC multi: source content changed')
++      assert(original_content and original_content.size > 0, 'RU NPC multi: source content changed')
+     end
+     local template = take[6] == 'streamed' and english or streamed_template
+     local russian = game.assets.create_resource(template.data, 'keen::SoundResource', take[2], 0)
+     russian.data.debugName = 'RU_' .. take[1]
+     russian.data.frameCount = take[3]
+     russian.data.duration = english.data.duration
+-    local content = load_russian_audio(russian, take[5], take[4])
++    local content = load_russian_audio(russian, take[5], take[4], take[3])
+     russian.data.streamedData.hash = content
+     russian_container.data.entries[index].value.sound = russian.guid
+   end
